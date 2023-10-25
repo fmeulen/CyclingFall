@@ -1,0 +1,830 @@
+---
+title: "Supplementary material to - Cycling fall threshold based on perturbed cyclist experiments -- version 2"
+author: "Marco Reijne, Frank van der Meulen, Arend Schwaab and Frans van der Helm"
+output: 
+  
+   
+   html_document:
+    code_folding: show
+    toc: TRUE
+    toc-depth: 2
+    font_adjustment: -1
+    highlight: monochrome
+    theme: flatly 
+            
+editor_options: 
+  chunk_output_type: console
+  markdown: 
+    wrap: 72
+---
+
+```{r, echo=FALSE,warning=FALSE, include=FALSE}
+library(knitr)
+opts_chunk$set(#results="show",  # hide results
+               fig.show="show", # hide figs
+               warning=FALSE,   # do not show warnings
+               message=FALSE,
+               #echo=TRUE,
+               #eval=FALSE,      # do not evaluate code
+               fig.width=7,
+               fig.height=3.5,
+               fig.align='center')
+```
+
+The following R packages are used in the analysis.
+
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(brms)
+library(rstanarm)
+library(ggdist)  
+library(skimr)
+library(Amelia)  
+library(caret)
+library(rpart.plot)
+library(gridExtra)
+library(lme4)
+library(BAS)
+library(latex2exp)
+
+# Set theme for ggplot
+mytheme = theme_bw()
+theme_set(mytheme)  
+```
+
+Read the data
+
+```{r}
+d <-  read_csv("PerturbedCyclistExperimentalDataTUDelft2022.csv", 
+        col_types = cols(participant_ID = col_character(), 
+        outcome = col_factor()))
+```
+
+We reorder `participant_ID` according to `age`, filter out initial
+search data and remove some columns that we don't further need in the
+analysis.
+
+```{r}
+d <- d %>% 
+  mutate(participant_ID = fct_reorder(participant_ID, age)) %>%
+  filter(initial_search==FALSE, exclude=="NO") %>% 
+  select(-c(pull_force, comments, initial_search, exclude)) 
+
+d %>% glimpse()
+```
+
+## Exploratory data analysis
+
+### Missing data
+
+```{r}
+d %>% skim()
+```
+
+```{r}
+plot_missing(d, missing_only=TRUE, ggtheme =mytheme)
+```
+
+```{r}
+d %>% missmap(y.labels=d$participant_ID, 
+              main="Missingness map, (participant_ID on vertical axis)")
+```
+
+### Histograms of predictors on a numerical scale
+
+```{r}
+dcontinuous <- d %>% select(age, angular_momentum, delta_dot_zero, delta_zero, length,
+                            phi_dot_zero, phi_zero, psi_zero, Q_zero, reaction_time, 
+                            skill_effort, skill_performance, weight)
+dcontinuous %>% plot_histogram(ggtheme=mytheme)
+```
+
+### Zoom into peak near zero for reaction time
+
+```{r}
+d %>% drop_na() %>%
+  mutate(`log10(reaction_time)`=log10(reaction_time)) %>%
+  ggplot(aes(x=`log10(reaction_time)`)) +
+  geom_histogram(bins=50,colour="white")
+```
+
+### Investigate correlations
+
+```{r}
+plot_correlation(dcontinuous, ggtheme = mytheme) 
+```
+
+Hence, only `length` and `weight` have moderate correlation.
+
+### Compute fraction of falling for each velocity and participant
+
+```{r}
+fracfalling <- d %>% mutate(velocity_=as.factor(velocity)) %>%
+  group_by(participant_ID, velocity_) %>%
+  summarise(n=n(), 
+  fraction_falling=mean(outcome=="1"),
+  skill_performance=mean(skill_performance),
+  participant_ID = first(participant_ID),
+  age=mean(age),
+  gender=first(gender),
+  skill_effort=first(skill_effort),
+  average_reaction_time=mean(reaction_time))
+
+fracfalling
+```
+
+Visualise
+
+```{r}
+fracfalling %>% 
+  ggplot(aes(x=participant_ID, y = fraction_falling, colour=velocity_)) +
+  geom_point() 
+```
+
+### Influence angular momentum
+
+```{r}
+d %>% 
+  ggplot(aes(x=angular_momentum, y=outcome)) +
+  geom_jitter(height=0.2)
+```
+
+We can make separate panels for each participant and colour according to
+velocity
+
+```{r}
+d %>% mutate(velocity=as.factor(velocity)) %>%
+  ggplot(aes(x=angular_momentum, y = outcome, colour=velocity)) + 
+  geom_jitter(height=0.1,size=0.5) + 
+  facet_wrap(~participant_ID,nrow=4) + 
+  labs(x="angular momentum", y="y")+
+  theme(legend.position = "top")
+```
+
+### Some QQ-plots
+
+We investigate in which sense the variables `phi_zero`, `phi_dot_zero`,
+`delta_zero`, `delta_dot_zero`, `psi_zero` and `Q_zero` differ over the
+binary outcome.
+
+```{r}
+dmeas <- d %>% select(outcome, phi_zero, phi_dot_zero,
+                 delta_zero, delta_dot_zero, psi_zero, Q_zero) %>%
+                 pivot_longer(cols=contains("zero"), names_to="measurement", values_to="value")
+  
+dmeas %>%  
+  ggplot(aes(sample=value,colour=outcome)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~measurement, scales="free") +
+  labs(x="theoretical", y="sample")
+```
+
+We observe similar patterns for all of these 6 variables.
+
+### Relation phi_dot_zero and pull direction
+
+```{r}
+d %>% ggplot(aes(sample=phi_dot_zero,colour=outcome, shape=pull_direction)) +
+  stat_qq(size=2)
+```
+
+## Classification tree and random forest
+
+### Classification tree
+
+We fit a classification tree to get a first impression of variables that
+matter for predicting the outcome variable. The advantage of such a
+method is that it is insensitive to noise variables that don't have
+predictive power.
+
+```{r}
+tr <- train(outcome ~ ., data = na.omit(d), method='rpart', tuneLength=10)
+rpart.plot(tr$finalModel,extra=101)
+```
+
+```{r}
+ggplot(varImp(tr))
+```
+
+### Random forest
+
+Classification trees are highly variable. Therefore, we fit a random
+forest. As the fraction of rows containing missing values is relatively
+small, we fit the RF without rows containing missing values.
+
+```{r}
+d_dropna  <- d %>% drop_na()
+tr_rf <- train(outcome ~ ., data = d_dropna, method='rf',
+               trControl=trainControl("cv"), importance = TRUE, tuneLength=10)
+ggplot(varImp(tr_rf))
+```
+
+We train the random forest again, but now such that participant_ID is
+not automatically converted to dummy variables. This implies that
+variable importance is computed for participant_ID by itself, and not
+for individual participants.
+
+```{r}
+X <- d_dropna %>% dplyr::select(-outcome)
+Y <- d_dropna %>% dplyr::select(outcome) %>% deframe()
+tr_rf2 <- train(X,Y, method='rf',
+            trControl=trainControl("cv"), importance = TRUE, tuneLength=10)
+p2 <- ggplot(varImp(tr_rf2))
+```
+
+Refit, but now further excluding participant_ID.
+
+```{r}
+Xsub <- X %>% dplyr::select(-participant_ID)
+tr_rf3 <- train(Xsub, Y, method='rf',
+            trControl=trainControl("cv"), importance = TRUE, tuneLength=10)
+p3 <- ggplot(varImp(tr_rf3))
+```
+
+Put the two figures side by side
+
+```{r}
+grid.arrange(p2,p3, ncol=2)
+```
+
+Not surprisingly, if `participant_ID` is dropped, then `length`,
+`weight` and `age` get assigned higher variable importance.
+
+## Bayesian Model Averaging
+
+Our analysis has two objectives:
+
+-   we wish to know which variables influence the chances of falling;
+
+-   we wish to predict the threshold angular velocity at a certain speed
+    for new participants.
+
+First, we standardise (mean centered, scaled to have unit standard
+deviation) the numerical variables. This helps to interpret the
+magnitude of the estimated coefficients.
+
+```{r}
+preProcValues <- preProcess(d, method = c("center", "scale"))
+dTransformed <- predict(preProcValues, d) %>% drop_na()
+```
+
+We drop the NA-rows (there are not too many), as further ahead these
+will be dropped anyway in bas.glm.
+
+Note that not all participants participate in an equal number of
+experiments:
+
+```{r}
+dTransformed %>% group_by(participant_ID) %>%  count() %>%
+  ggplot(aes(x=participant_ID,y=n)) + geom_col()
+```
+
+We use Bayesian model averaging using the `BAS`-library to gain insight
+into which variables are important to be included. We force categorical
+variables to be fully included or not (hence we don't allow certain
+factor levels to be included, while other levels of the same factors
+not). We insist on a model that contains `angular_momentum`, for else we
+cannot determine the required threshold value from the inferred model.
+
+We use a uniform prior over all possible models and use the default
+mixture of Zellner-g-prior on the coefficients.
+
+```{r}
+IT <- 20000 # nr of MCMC iterations
+set.seed(15)
+bma0 = bas.glm(outcome ~ ., data=dTransformed, method="MCMC", 
+               MCMC.iterations=IT, family=binomial(), 
+               include.always = ~ angular_momentum,
+               modelprior=uniform(), force.heredity=TRUE)
+print(summary(bma0),digits=2)
+```
+
+```{r}
+diagnostics(bma0) # should be on straight line
+```
+
+Experiments containing missing values are dropped in the analysis. As
+seen in the exploratory data analysis, the fraction of missing data is
+modest. The following figure visualises the models which get highest
+posterior probability. Black blocks denote that a variable is not
+contained in the model
+
+```{r}
+image(bma0, rotate=F)
+```
+
+One way to choose a model, is by taking the model for which the marginal
+posterior inclusion probabilities exceed 1/2, the so called posterior
+median model.
+
+```{r}
+aa <- tibble(probne0=bma0$probne0, names=bma0$namesx) 
+partic_p <- aa %>% filter(names=="participant_ID1") %>% select(probne0)
+
+p_inclusion <- aa %>% 
+  filter(!str_detect(names,"participant_ID")) %>%
+  filter(!str_detect(names,"Interc")) %>%
+  add_row(names="participant_ID", probne0=as.numeric(partic_p)) %>% 
+  mutate(names2= reorder(names, probne0, median))  %>% 
+  ggplot(aes(x=probne0, y=names2)) + 
+  geom_point() + geom_vline(xintercept=0.5, colour="red") +
+  labs(x="posterior inclusion probability", y="")
+
+p_inclusion
+```
+
+This suggests a model containing: `angular_momentum`, `participant_ID`,
+`delta_ dot_ zero`, `pull_ID`, `velocity`, `skill_performance`,
+`pull_direction` and `phi_zero`.
+
+Now suppose we drop `participant_ID` from the list of predictors.
+
+```{r}
+set.seed(13)
+bma1 = bas.glm(outcome ~ ., data=dTransformed[,-1], method="MCMC", 
+               include.always = ~ angular_momentum,
+               MCMC.iterations=IT, family=binomial(), 
+               modelprior=uniform(), force.heredity=TRUE)
+print(summary(bma1),digits=2)
+```
+
+```{r}
+diagnostics(bma1) # should be on straight line 
+```
+
+```{r}
+image(bma1, rotate=F)
+```
+
+```{r}
+aa1 <- tibble(probne0=bma1$probne0, names=bma1$namesx) 
+partic_p <- aa1 %>% filter(names=="participant_ID1") %>% select(probne0)
+
+p_inclusion1 <- aa1 %>% 
+  filter(!str_detect(names,"participant_ID")) %>%
+  filter(!str_detect(names,"Interc")) %>%
+  add_row(names="participant_ID", probne0=as.numeric(partic_p)) %>% 
+  mutate(names2= reorder(names, probne0, median))  %>% 
+  ggplot(aes(x=probne0, y=names2)) + 
+  geom_point() + geom_vline(xintercept=0.5, colour="red") +
+  labs(x="posterior inclusion probability", y="")
+
+p_inclusion1
+```
+
+Not surprisingly, in this case some participant characteristics enter
+the median probability model.
+
+We make a plot of confidence intervals for the coefficients, excluding
+those for participants.
+
+```{r}
+c0 <- confint(coef(bma0))
+c0_df <- tibble(coefficient=names(c0[,1]), mean=as.vector(c0[,3]),
+                low=as.vector(c0[,1]), up= as.vector(c0[,2])) %>%
+                mutate(type=str_detect(coefficient,"partic"))
+
+c1 <- confint(coef(bma1))
+c1_df <- tibble(coefficient=names(c1[,1]), mean=as.vector(c1[,3]), 
+                low=as.vector(c1[,1]), up= as.vector(c1[,2])) %>%
+                mutate(type=str_detect(coefficient,"partic"))
+
+c01_df <- rbind(c0_df, c1_df) %>% filter(type==FALSE) %>%  
+  mutate(participant_included=rep(c("yes", "no"),each=18))
+
+c01_df %>% 
+  ggplot(aes(x=coefficient, y=mean,color=participant_included)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin=low, ymax=up)) +
+  geom_hline(yintercept = 0)+ coord_flip() + 
+  theme(legend.position = "bottom")
+```
+
+## Multilevel approach
+
+The preceding analysis has been helpful in identifying important
+predictors. It does however neglect the multilevel structure. It does
+not seem easy to specify that in bas.glm. For that reason, we refit the
+model, including the multilevel structure, using the `brms` package.
+
+We first set the prior distributions on the coefficients to be zero-mean
+Normally distributed with standard-deviation of 2.
+
+```{r}
+prior1 <- set_prior("normal(0, 2)", class = "b")
+```
+
+We fit a multilevel version based on the median probability model
+appearing from `bma0`.
+
+```{r}
+set.seed(16)
+fit0 <- brm(outcome ~ 0 + Intercept + phi_zero + pull_direction +
+            skill_performance + delta_dot_zero + velocity +
+            pull_ID + angular_momentum +  (1 | participant_ID), 
+            data=dTransformed,
+            family = bernoulli(link="logit"),
+            prior=prior1,
+            warmup = 5000, 
+            iter = IT, 
+            chains = 4, 
+            seed = 123)
+
+fit0 %>% summary()
+```
+
+```{r}
+prior_summary(fit0)
+```
+
+These coefficients are not exactly the same as under bma0 since
+
+-   we don't use Bayesian model averaging;
+
+-   the prior distribution is different;
+
+-   we employ a multilevel model.
+
+## Compare Bayesian with frequentist results for model 0
+
+```{r}
+dTransformed_reformat <- dTransformed %>%
+                  mutate(outcomenum = as.numeric(outcome)-1)
+glmer_fit0 <- glmer(outcomenum ~  phi_zero + pull_direction +
+                      skill_performance + delta_dot_zero + velocity +
+                      pull_ID + angular_momentum +  (1 | participant_ID), 
+                     data=dTransformed_reformat, family = binomial)
+```
+
+To facilitate comparison, we show both the Bayesian and frequentist
+fitted models:
+
+```{r}
+sum0 <- fit0 %>% summary() %>% unclass() 
+sum0$fixed
+sum0$random
+```
+
+to be compared to
+
+```{r}
+glmer0 <- glmer_fit0 %>% summary() %>% unclass() 
+coefficients(glmer0)
+glmer0$varcor
+```
+
+The posterior means from `brm` and estimates from `glmer` are very
+similar. Additionally, we obtain significance of all variables in the
+model.
+
+### Posterior predictive check
+
+Posterior predictive checks are used to establish visually if the fitted
+model captures certain features in the data appropriately. Here we
+define such a check.
+
+The function `checks2` compares the fraction of falls for the total
+number of perturbations of each participant to that based on 1000
+predictions of the fitted model. It does so separately for each of the
+velocities, which are in the set {6,12,18}
+
+```{r}
+checks2 <- function(d, fit) # fraction falling by participant and factor(velocity)
+{
+  pred <- posterior_predict(fit, ndraws=1000)
+  fracfalling1 <- d %>% 
+    mutate(velocity=as.factor(round(velocity,1))) %>%     
+    mutate(predicted_average=colMeans(pred)) %>% 
+    group_by(velocity, participant_ID) %>%
+    summarise(n=n(), observed=mean(outcome=="1"),
+              predicted=mean(predicted_average)) %>%
+    pivot_longer(cols=c(predicted, observed), names_to="type", values_to="fraction")
+  
+  p <- fracfalling1 %>% 
+    ggplot() + 
+    geom_point(aes(x=velocity, y = fraction,colour=type)) +
+    labs(x="velocity (standardized)", y="fraction of falls of the total number of perturbations") 
+  p + facet_wrap(~participant_ID) 
+}
+
+checks2(dTransformed, fit0)
+```
+
+## Prior sensitivity
+
+We check the effect of the specified prior distribution on the estimates
+for the coefficients.
+
+```{r}
+prior_vague <- set_prior("normal(0, 5)", class = "b") # way larger sd
+
+prior_centred  <- set_prior("normal(0, 1)", class = "b") 
+# somewhat small sd, possibly pulls estimates towards zero.
+```
+
+Also fit the model with these priors:
+
+```{r}
+fit0_vague <- brm(outcome ~ 0 + Intercept + phi_zero + pull_direction +
+            skill_performance + delta_dot_zero + velocity +
+            pull_ID + angular_momentum +  (1 | participant_ID), 
+            data=dTransformed,
+            family = bernoulli(link="logit"),
+            prior=prior_vague,
+            warmup = 5000, 
+            iter = IT, 
+            chains = 4, 
+            seed = 123)
+fit0_centred <- brm(outcome ~ 0 + Intercept + phi_zero + pull_direction +
+            skill_performance + delta_dot_zero + velocity +
+            pull_ID + angular_momentum +  (1 | participant_ID), 
+            data=dTransformed,
+            family = bernoulli(link="logit"),
+            prior=prior_centred,
+            warmup = 5000, 
+            iter = IT, 
+            chains = 4, 
+            seed = 123)
+```
+
+```{r}
+fit0 %>% summary()
+```
+
+```{r}
+fit0_vague %>% summary()
+```
+
+```{r}
+fit0_centred %>% summary()
+```
+
+From here, we see that the differences with the "vague" prior are small;
+the "centred" prior shrinks coefficients more towards zero and appears
+to have some effect on the estimates.
+
+## Visualise effect of numerical predictors
+
+Some example plots to illustrate the effect of a particular variable on
+`outcome`.
+
+```{r}
+conditional_effects(fit0, effects = "pull_direction")
+```
+
+```{r}
+conditional_effects(fit0, effects = c("velocity"))
+```
+
+```{r}
+conditional_effects(fit0, effects = c("delta_dot_zero"))
+```
+
+```{r}
+conditional_effects(fit0, effects = c("angular_momentum:velocity"))
+```
+
+## Visualising the posterior
+
+We visualise the posterior by showing density- and traceplots of
+posterior samples.
+
+```{r}
+fit0 %>% plot(newpage=FALSE, ask=FALSE)
+```
+
+We extract `IT` posterior samples from the fitted model.
+
+```{r}
+ps <- brms::as_draws_df(fit0) %>% tibble() %>% sample_n(IT)
+```
+
+We plot all parameters, except for participant effects
+
+```{r}
+ln <- c("b_Intercept", "b_skill_performance", "b_velocity", "b_phi_zero",
+        "b_pull_ID", "b_pull_directionCW",  "b_angular_momentum",
+         "b_delta_dot_zero","sd_participant_ID__Intercept")
+
+ps_coef <- ps %>% dplyr::select(-contains("r_particip")) %>%
+  dplyr::select(contains("b_") | contains("sd_")) %>%
+  tidyr::pivot_longer(cols=ln,names_to="coefficient", values_to="value") %>%
+  mutate(coefficient=str_remove(coefficient,"b_")) %>% 
+  mutate(coefficient = recode(coefficient, `sd_participant_ID__Intercept` = "sd_participant"))
+
+  ps_coef %>% ggplot(aes(x=value, y = reorder(coefficient, value,median))) +
+    stat_halfeye( point_size=1, interval_size=0.5)+
+    labs(x="coefficient", y = "")
+```
+
+Similarly for participant effects
+
+```{r}
+ps_sub <- ps %>% dplyr::select(contains("r_particip"))
+ps_sublong <-  ps_sub %>% tidyr::pivot_longer(cols=contains("r_particip"),
+                names_to="participant", values_to="value") %>%
+                mutate(participant_ID=as.factor(readr::parse_number(participant)))
+ps_complete <- left_join(ps_sublong, d, by ="participant_ID")
+
+ps_complete %>% ggplot(aes(x=value, 
+            y = reorder(participant_ID, value,median),fill=age )) +
+            stat_halfeye(point_colour="orange", point_size=1, interval_size=0.5)+
+         #   labs(x="coefficient", y = "participant_ID")
+    labs(x=TeX(r'($\beta_i$)'), y="participant_ID")
+
+```
+
+```{r}
+rm(ps_coef, ps_sub, ps_sublong, ps_complete) # free memory
+```
+
+## Computing perturbation threshold for a few participants in the study.
+
+Consider the results for following persons:
+
+-   participant 1 with 12 km/h and 6 km/h
+
+-   participant 9 with 12 km/h and 6 km/h
+
+-   participant 11 with 12 km/h and with 6 km/h and with 18 km/h
+
+-   participant 12 with 12 km/h and with 6 km/h
+
+-   `phi_zero` = 0 (bicycle in straight position), `pull_directionCW` =
+    1, `delta_dot_zero` = 0, `pull_id` = 1
+
+```{r}
+pIDs <- c(1,1,9,9,11,11,11,12,12) # arbitrarily choose a few participants
+```
+
+```{r}
+d1 <- d %>% filter(participant_ID==as.character(1)) %>% slice(1)
+d9 <- d %>% filter(participant_ID==as.character(9)) %>% slice(1)
+d11 <- d %>% filter(participant_ID==as.character(11)) %>% slice(1)
+d12 <- d %>% filter(participant_ID==as.character(12)) %>% slice(1)
+d_existing <- bind_rows(d1,d1,d9,d9,d11,d11,d11,d12,d12) %>% 
+  mutate(participant_ID2=c("P1_v6","P1_v12","P9_v6", "P9_v12", "P11_v6","P11_v12","P11_v18", "P12_v6", "P12_v12" )) %>%
+  mutate(velocity=c(6,12,6,12,6,12,18,6,12)) %>%
+  mutate(phi_zero=rep(0,9), pull_direction=rep("CW",9), delta_dot_zero=rep(0,9), pull_ID=rep(1,9))
+
+d_existingTransformed <- predict(preProcValues, d_existing)
+
+
+nps <- nrow(ps) # nr of posterior samples
+zz = rep(0,nps)
+z <- data.frame("P1_v6" = zz,"P1_v12" = zz,"P9_v6" = zz, "P9_v12" = zz, "P11_v6" = zz,
+                "P11_v12" = zz,"P11_v18" = zz, "P12_v6" = zz, "P12_v12" = zz)
+head(z)
+
+```
+
+### Function to compute threshold function
+
+```{r}
+angular_threshold <- function(participant_ch, postdraw, participant_postdraw)
+{
+    xx <- participant_postdraw +
+        postdraw$b_Intercept + 
+        postdraw$b_skill_performance * participant_ch$skill_performance +
+        postdraw$b_velocity * participant_ch$velocity+
+        postdraw$b_pull_ID * participant_ch$pull_ID +
+        postdraw$b_pull_directionCW * (participant_ch$pull_direction=="CW") + 
+      #  postdraw$b_phi_zero * participant_ch$phi_zero +
+        postdraw$b_delta_dot_zero * participant_ch$delta_dot_zero 
+    out <- -xx/(postdraw$b_angular_momentum) 
+    out
+}  
+
+for (j in 1:9)
+{
+  ID <- pIDs[j]
+  # select for the participant posterior draws from its intercept:
+  lab <- paste0("r_participant_ID[",as.character(ID),",Intercept]")
+  raneff <- ps[,lab] %>% deframe()
+  #  choose participant experimental setting:
+  participant_ch <- d_existingTransformed[j,] 
+
+  for (i in 1:nps)  # for each posterior sample
+  { 
+    postdraw <- ps %>% slice(i) 
+    z[i, j] <- angular_threshold(participant_ch, postdraw, raneff[i])
+  }
+}
+m_ang <- mean(na.omit(d)$angular_momentum)
+sd_ang <- sd(na.omit(d)$angular_momentum)
+
+angular_threshold_df <- apply(z,2, function(x) {  m_ang + sd_ang * x  }  )  # rescale each column
+angular_threshold_tidy <- as_tibble(angular_threshold_df) %>%
+                          pivot_longer(cols=1:9, names_to="participant", values_to="eta") 
+
+```
+
+## Plotting the results
+
+```{r}
+angular_threshold_tidy %>% 
+  #ggplot(aes(x=eta, y=reorder(participant, eta, median))) +
+  ggplot(aes(x=eta, y=participant)) +
+  stat_halfeye(fill="lightblue") +
+  labs(x=TeX(r'($\Delta L_{50\%}$)'), y ="") +
+  ggtitle("Threshold value for angular momentum")
+```
+
+## Computing perturbation threshold for six new fictive participants.
+
+We manually construct "new" participants, for which we will compute the
+perturbation threshold (for the variables in model 5 we provide values,
+while all remaining columns are just filled with NA-values).
+
+# New fictive participants
+
+-   skill performance 40, velocity 12 km/h
+
+-   skill performance 90, velocity 12 km/h
+
+-   skill performance 40, velocity 6 km/h
+
+-   skill performance 90, velocity 6 km/h
+
+-   skill performance 40, velocity 18 km/h
+
+-   skill performance 40, velocity 25 km/h (velocity not included in
+    experiment)
+
+```{r}
+dpred <- tibble(participant_ID=c("new_v12_sp40", "new_v12_sp90", "new_v6_sp40", "new_v6_sp90","new_v18_sp40","new_v25_sp40"),
+                velocity=c(12,12,6,6,18,25), age = rep(NA,6),
+                skill_performance=c(40,90,40,90,40,40), pull_ID=rep(1,6),
+                pull_direction=rep("CW",6), weight=rep(NA,6), length=rep(NA,6),
+                skill_effort = rep(NA,6), initial_search=rep(NA,6), phi_zero=rep(0,6),
+                phi_dot_zero=rep(NA,6), delta_zero=rep(NA,6), delta_dot_zero=rep(0,6),
+                psi_zero=rep(NA,6), Q_zero=rep(NA,6), comments=rep(NA,6),
+                exclude=rep(NA,6), reaction_time=rep(NA,6), pull_force=rep(NA,6),
+                angular_momentum=rep(NA,6))
+```
+
+Now we will predict for these new participants:
+
+```{r}
+dpred_tf <- predict(preProcValues, dpred)  # tf=transformed as we did for the model
+dpred_tf$delta_dot_zero <- rep(0,6)
+
+nparticipants = nrow(dpred)  # nr of participants for which we wish to predict
+zz = rep(0,nps)
+z <- data.frame(new_participant1 = zz,  new_participant2 = zz,
+                new_participant3 = zz,new_participant4 = zz,
+                new_participant5 = zz, new_participant6 = zz)
+
+for (j in 1:nparticipants)  # for each participant we wish to find threshold value
+{
+  for (i in 1:nps)  # for each participant
+  { 
+    particip =  rnorm(1,sd=ps$sd_participant_ID__Intercept[i])
+    z[i, j] <- angular_threshold(dpred_tf[j,], ps[i,], particip)
+  }
+}  
+# rescale each column:
+angular_threshold_df_new <- apply(z,2, function(x) { m_ang + sd_ang * x})  
+angular_threshold_tidy_new <- as_tibble(angular_threshold_df_new) %>%
+      pivot_longer(cols=contains("new"), names_to="participant", values_to="eta") %>%
+      mutate(participant=fct_recode(participant, 
+                                    s40v12="new_participant1",
+                                    s90v12="new_participant2",
+                                    s40v6="new_participant3",
+                                    s90v6="new_participant4",
+                                    s40v18="new_participant5",
+                                    s40v25="new_participant6"))
+
+```
+
+## Plotting the results
+
+```{r}
+angular_threshold_tidy_new %>% 
+#  ggplot(aes(x=eta, y=reorder(participant, eta, median))) +
+  ggplot(aes(x=eta, y=participant)) +
+  stat_halfeye(fill="lightblue") +
+  labs(x=TeX(r'($\Delta L_{50\%}$)'), y ="") +
+  ggtitle("Threshold value for angular momentum")
+```
+
+We can also make a combined plot for participants which were part of the
+study and "new" participants:
+
+```{r}
+nr <- nrow(angular_threshold_tidy)
+nr_new <- nrow(angular_threshold_tidy_new)
+factor_new <- c(rep("no",nr), rep("yes",nr_new))
+
+bind_rows(angular_threshold_tidy, angular_threshold_tidy_new) %>% 
+    mutate(new=factor_new) %>%  
+    ggplot(aes(x=eta, y=reorder(participant, eta, median), fill=new)) +
+    stat_halfeye(fill="lightblue") + labs(x="eta", y = "participant") + facet_wrap(~new)
+```
+
+This shows that we can fairly accurately find the threshold value for
+participants within the study, but have large uncertainty about this
+value for "future" unseen participants. This is natural, as we don't
+know their inherent cycling performance.

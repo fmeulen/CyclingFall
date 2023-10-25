@@ -1,0 +1,24 @@
+name,description,units
+participant_ID,identification number participant,-
+gender,gender of participant,male or female
+age,age of participant,years
+weight,weight of participant,kg
+length,length of participant,m
+control_performance,variable to describe the control skill of the cyclist, defined as how accurate the particiant can cycle on the centerline, this number is the standard deviation of the y coordinate for the 1 minute the participants was instructed to cycle on the centerline,mm
+control_effort,variable to describe the control effort of the cyclist, defined as the time integral of the steer rate squared for the 1 minute the participant was instructed to cycle on the centerline,-
+velocity,forward speed of bicycle,km/h
+pull_ID,identification number pull on handlebar,-
+initial_search,is pull on handlebar part of the initial threshold search,TRUE or FALSE
+pull_direction,direction of pull where CW is clockwise and CCW is counterclockwise,CW or CCW
+outcome,outcome of pull on handlebar where 0 is balance recovery and 1 is fall,0 or 1
+pull_force,the prescribed control force of the perturbation,N
+angular_momentum,angular momentum as a result of pull on handlebar,Nms
+reaction_time,reaction time of participant to each pull on handlebar defined as when EMG signal first exceeded 2*sqrt(2) times the standard deviation of the background EMG signal,s
+phi_zero,lean angle at the moment the pull is applied,deg
+phi_dot_zero,lean rate at the moment the pull is applied,deg/s
+delta_zero,steering angle at the moment the pull is applied,deg
+delta_dot_zero,steering rate at the moment the pull is applied,deg/s
+psi_zero,heading at the moment the pull is applied,deg
+Q_zero,lateral position (y-coordinate) of front wheel ground contact point,mm
+comments,comments about observation,-
+exclude,should observation be excluded,YES or NO
