@@ -1,6 +1,6 @@
 ---
-title: "Supplementary material to - Cycling fall threshold based on perturbed cyclist experiments -- version 2"
-author: "Marco Reijne, Frank van der Meulen, Arend Schwaab and Frans van der Helm"
+title: "Supplementary material to - Cycling fall threshold based on perturbed cyclist experiments"
+author: "M.M. Reijne, F.H. van der Meulen, F.C.T. van der Helm and A.L. Schwab"
 output: 
   
    
@@ -114,7 +114,6 @@ d %>% drop_na() %>%
 ```{r}
 plot_correlation(dcontinuous, ggtheme = mytheme) 
 ```
-
 Hence, only `length` and `weight` have moderate correlation.
 
 ### Compute fraction of falling for each velocity and participant
@@ -135,7 +134,6 @@ fracfalling
 ```
 
 Visualise
-
 ```{r}
 fracfalling %>% 
   ggplot(aes(x=participant_ID, y = fraction_falling, colour=velocity_)) +
@@ -456,6 +454,7 @@ glmer_fit0 <- glmer(outcomenum ~  phi_zero + pull_direction +
                       skill_performance + delta_dot_zero + velocity +
                       pull_ID + angular_momentum +  (1 | participant_ID), 
                      data=dTransformed_reformat, family = binomial)
+glmer_fit0 %>% summary()
 ```
 
 To facilitate comparison, we show both the Bayesian and frequentist
@@ -466,15 +465,12 @@ sum0 <- fit0 %>% summary() %>% unclass()
 sum0$fixed
 sum0$random
 ```
-
 to be compared to
-
 ```{r}
 glmer0 <- glmer_fit0 %>% summary() %>% unclass() 
 coefficients(glmer0)
 glmer0$varcor
 ```
-
 The posterior means from `brm` and estimates from `glmer` are very
 similar. Additionally, we obtain significance of all variables in the
 model.
@@ -614,7 +610,7 @@ ps_coef <- ps %>% dplyr::select(-contains("r_particip")) %>%
   mutate(coefficient=str_remove(coefficient,"b_")) %>% 
   mutate(coefficient = recode(coefficient, `sd_participant_ID__Intercept` = "sd_participant"))
 
-  ps_coef %>% ggplot(aes(x=value, y = reorder(coefficient, value,median))) +
+ps_coef %>% ggplot(aes(x=value, y = reorder(coefficient, value,median))) +
     stat_halfeye( point_size=1, interval_size=0.5)+
     labs(x="coefficient", y = "")
 ```
@@ -633,7 +629,6 @@ ps_complete %>% ggplot(aes(x=value,
             stat_halfeye(point_colour="orange", point_size=1, interval_size=0.5)+
          #   labs(x="coefficient", y = "participant_ID")
     labs(x=TeX(r'($\beta_i$)'), y="participant_ID")
-
 ```
 
 ```{r}
@@ -821,10 +816,10 @@ factor_new <- c(rep("no",nr), rep("yes",nr_new))
 bind_rows(angular_threshold_tidy, angular_threshold_tidy_new) %>% 
     mutate(new=factor_new) %>%  
     ggplot(aes(x=eta, y=reorder(participant, eta, median), fill=new)) +
-    stat_halfeye(fill="lightblue") + labs(x="eta", y = "participant") + facet_wrap(~new)
+    stat_halfeye(fill="lightblue") + labs(x="eta", y = "participant") 
 ```
 
 This shows that we can fairly accurately find the threshold value for
 participants within the study, but have large uncertainty about this
-value for "future" unseen participants. This is natural, as we don't
-know their inherent cycling performance.
+value for "future" unseen participants. This is somewhat natural, as we don't
+know the inherent cycling performance of unseen participants.
