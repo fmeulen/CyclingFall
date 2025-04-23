@@ -6,4 +6,4 @@ The script "cycling_fall_figs_for_article.R" produces the analyses and figures w
 The script "cycling_fall_full_analysis.Rmd" is an R-markdown file which does the full analysis but also contains extra exploratory figures and fitted models. 
 When run, it produces the file "cycling_fall_full_analysis.Rmd.html".
 
-The pdf "Additional Recommendations" contains further notes on recommendations for future research of practical application of the resuslts. 
+The PDF "Additional Recommendations" contains further notes on recommendations for future research of practical application of the results. 
